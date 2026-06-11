@@ -3,13 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-try:
-    from resume_parser_2 import chunk_text
-except Exception as exc:
-    raise ImportError(
-        "Could not import chunk_text from resume_parser_2.py. "
-        f"Ensure resume_parser_2.py defines chunk_text and that dependencies are installed. Original error: {exc}"
-    ) from exc
+from resume_parser import chunk_text
 from utils import FAISS_DIR, call_openrouter, ensure_directories, now_iso
 
 METADATA_FILE = FAISS_DIR / "metadata.pkl"

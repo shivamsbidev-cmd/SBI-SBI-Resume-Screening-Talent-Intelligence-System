@@ -23,7 +23,7 @@ Recruiters can upload multiple PDF resumes, extract structured candidate data, s
 
 - `app.py` - Streamlit frontend and page orchestration
 - `database.py` - SQLite setup, CRUD operations, transaction handling
-- `resume_parser_2.py` - PDF text extraction and resume metadata parsing
+- `resume_parser.py` - PDF text extraction and resume metadata parsing
 - `rag_engine.py` - Embeddings, FAISS index management, document retrieval, chat prompt assembly
 - `candidate_ranker.py` - JD/resume scoring and ranking logic
 - `talent_intelligence.py` - intelligence report generation
