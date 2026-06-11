@@ -1,10 +1,13 @@
-﻿# parser.py (improved starter version)
+# parser.py (improved starter version)
 # Replace your existing parser with this baseline and extend skill lists as needed.
 
 import re
 from pathlib import Path
 from typing import Dict, List
 from datetime import datetime
+
+import pdfplumber
+from pypdf import PdfReader
 
 from utils import clean_text, format_phone, hash_file_bytes, is_pdf_file
 

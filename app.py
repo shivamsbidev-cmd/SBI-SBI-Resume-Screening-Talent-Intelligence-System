@@ -22,6 +22,7 @@ from analytics import (
 )
 from candidate_ranker import generate_interview_questions, rank_candidates
 from database import (
+    clear_all_data,
     get_resume_by_id,
     init_db,
     insert_resume,
@@ -146,24 +147,24 @@ def show_dashboard(resumes: List[Dict[str, Any]], rankings: Optional[List[Dict[s
     with col1:
         chart = skill_frequency_chart(top_skill_counts)
         if chart is not None:
-            st.plotly_chart(chart, use_container_width=True)
+            st.plotly_chart(chart, width='stretch')
     with col2:
         chart = experience_histogram(resumes)
         if chart is not None:
-            st.plotly_chart(chart, use_container_width=True)
+            st.plotly_chart(chart, width='stretch')
     col3, col4 = st.columns(2)
     with col3:
         chart = education_pie_chart(education_dist)
         if chart is not None:
-            st.plotly_chart(chart, use_container_width=True)
+            st.plotly_chart(chart, width='stretch')
     with col4:
         chart = certification_trend_chart(cert_counts)
         if chart is not None:
-            st.plotly_chart(chart, use_container_width=True)
+            st.plotly_chart(chart, width='stretch')
     if rankings:
         leaderboard = build_candidate_leaderboard(rankings)
         if leaderboard is not None:
-            st.plotly_chart(leaderboard, use_container_width=True)
+            st.plotly_chart(leaderboard, width='stretch')
 
 
 def show_candidate_explorer(resumes: List[Dict[str, Any]]) -> None:
@@ -290,13 +291,13 @@ def show_candidate_ranking(resumes: List[Dict[str, Any]], api_key: str, model_na
             st.dataframe(pd.DataFrame(ranking_results).head(20))
             leaderboard = build_candidate_leaderboard(ranking_results)
             if leaderboard is not None:
-                st.plotly_chart(leaderboard, use_container_width=True)
+                st.plotly_chart(leaderboard, width='stretch')
     else:
         st.info("Enter a job description and click Rank Candidates.")
 
 
 def show_database_explorer() -> None:
-    tab1, tab2 = st.tabs(["Browse Tables", "Delete Resume"])
+    tab1, tab2, tab3 = st.tabs(["Browse Tables", "Delete Resume", "Clear All Data"])
     
     with tab1:
         table = st.selectbox("Select a table to explore", ["resumes", "candidate_scores", "chat_history"])
@@ -375,6 +376,36 @@ def show_database_explorer() -> None:
                     st.rerun()
                 else:
                     st.error("Failed to delete candidate.")
+    
+    with tab3:
+        st.header("🔴 Clear All Data")
+        st.warning("⚠️ **DANGER ZONE** - This will permanently delete EVERYTHING:")
+        st.markdown("""
+        - All resumes from database
+        - All candidate scores
+        - All chat history
+        - All FAISS vector index files
+        - All uploaded resume files
+        
+        **This action CANNOT be undone!**
+        """)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔴 CLEAR ALL DATA", key="clear_all_confirm", help="Delete all data permanently"):
+                success, message = clear_all_data()
+                
+                if success:
+                    st.success("✅ " + message)
+                    st.balloons()
+                    st.info("The application will refresh to show the clean state.")
+                    st.rerun()
+                else:
+                    st.error("❌ " + message)
+        
+        with col2:
+            st.info("Use the button on the left to clear all data from the system.")
 
 
 def show_reports(resumes: List[Dict[str, Any]]) -> None:

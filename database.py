@@ -322,3 +322,49 @@ def delete_resume_from_vector_store(resume_id: int) -> Tuple[bool, str]:
             return False, f"Resume {resume_id} not found in vector store or already removed."
     except Exception as e:
         return False, f"Error removing from vector store: {str(e)}"
+
+
+def clear_all_data() -> Tuple[bool, str]:
+    """
+    Clear ALL data: resumes, related tables, vector store, and uploads.
+    
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    try:
+        import shutil
+        from pathlib import Path
+        from utils import FAISS_DIR, DATA_DIR
+        
+        conn = get_connection()
+        try:
+            with conn:
+                # Delete from all tables
+                conn.execute("DELETE FROM chat_history")
+                conn.execute("DELETE FROM candidate_scores")
+                conn.execute("DELETE FROM projects")
+                conn.execute("DELETE FROM certifications")
+                conn.execute("DELETE FROM skills")
+                conn.execute("DELETE FROM resumes")
+                
+                # Vacuum to clean up space
+                conn.execute("VACUUM")
+            
+            # Clear FAISS index files
+            if FAISS_DIR.exists():
+                for file in FAISS_DIR.glob("*"):
+                    if file.is_file():
+                        file.unlink()
+            
+            # Clear uploads directory
+            UPLOAD_DIR = DATA_DIR / "uploads"
+            if UPLOAD_DIR.exists():
+                for file in UPLOAD_DIR.glob("*"):
+                    if file.is_file():
+                        file.unlink()
+            
+            return True, "All data cleared successfully: Database, FAISS index, and uploads cleaned."
+        finally:
+            conn.close()
+    except Exception as e:
+        return False, f"Error clearing data: {str(e)}"
