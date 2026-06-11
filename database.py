@@ -11,8 +11,9 @@ DB_PATH = DATA_DIR / "sbi_talent_intelligence.db"
 
 def get_connection() -> sqlite3.Connection:
     ensure_directories()
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -122,49 +123,55 @@ def transaction() -> sqlite3.Cursor:
 
 def insert_resume(record: Dict[str, Any]) -> int:
     conn = get_connection()
-    with conn:
-        existing = conn.execute(
-            "SELECT id FROM resumes WHERE resume_hash = ?", (record["resume_hash"],)
-        ).fetchone()
-        if existing:
-            return existing["id"]
-        cursor = conn.execute(
-            """
-            INSERT INTO resumes (
-                resume_hash, file_name, candidate_name, email, phone,
-                current_role, current_company, experience_years, education,
-                skills, certifications, projects, resume_text,
-                parsed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record.get("resume_hash"),
-                record.get("file_name"),
-                record.get("candidate_name"),
-                record.get("email"),
-                record.get("phone"),
-                record.get("current_role"),
-                record.get("current_company"),
-                record.get("experience_years"),
-                record.get("education"),
-                json_serialize(record.get("skills", [])),
-                json_serialize(record.get("certifications", [])),
-                json_serialize(record.get("projects", [])),
-                record.get("resume_text"),
-                now_iso(),
-                now_iso(),
-                now_iso(),
-            ),
-        )
-        resume_id = cursor.lastrowid
-        insert_collections(resume_id, record)
-    conn.close()
-    return resume_id
+    try:
+        with conn:
+            existing = conn.execute(
+                "SELECT id FROM resumes WHERE resume_hash = ?", (record["resume_hash"],)
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            cursor = conn.execute(
+                """
+                INSERT INTO resumes (
+                    resume_hash, file_name, candidate_name, email, phone,
+                    current_role, current_company, experience_years, education,
+                    skills, certifications, projects, resume_text,
+                    parsed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.get("resume_hash"),
+                    record.get("file_name"),
+                    record.get("candidate_name"),
+                    record.get("email"),
+                    record.get("phone"),
+                    record.get("current_role"),
+                    record.get("current_company"),
+                    record.get("experience_years"),
+                    record.get("education"),
+                    json_serialize(record.get("skills", [])),
+                    json_serialize(record.get("certifications", [])),
+                    json_serialize(record.get("projects", [])),
+                    record.get("resume_text"),
+                    now_iso(),
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+            resume_id = cursor.lastrowid
+            insert_collections(resume_id, record, conn)
+            return resume_id
+    finally:
+        conn.close()
 
 
-def insert_collections(resume_id: int, record: Dict[str, Any]) -> None:
-    conn = get_connection()
-    with conn:
+def insert_collections(resume_id: int, record: Dict[str, Any], conn: sqlite3.Connection = None) -> None:
+    if conn is None:
+        conn = get_connection()
+        close_conn = True
+    else:
+        close_conn = False
+    try:
         skills = record.get("skills", [])
         certifications = record.get("certifications", [])
         projects = record.get("projects", [])
@@ -183,7 +190,11 @@ def insert_collections(resume_id: int, record: Dict[str, Any]) -> None:
                 "INSERT INTO projects (resume_id, project_name, description) VALUES (?, ?, ?)",
                 (resume_id, project.get("name"), project.get("description")),
             )
-    conn.close()
+        if close_conn:
+            conn.commit()
+    finally:
+        if close_conn:
+            conn.close()
 
 
 def get_resume_by_id(resume_id: int) -> Optional[sqlite3.Row]:
@@ -251,3 +262,63 @@ def resume_exists(resume_hash: str) -> bool:
     with get_connection() as conn:
         row = conn.execute("SELECT 1 FROM resumes WHERE resume_hash = ?", (resume_hash,)).fetchone()
         return row is not None
+
+
+def delete_resume(resume_id: int) -> Tuple[bool, str]:
+    """
+    Delete a resume and all its associated data from all tables.
+    
+    Args:
+        resume_id: The ID of the resume to delete
+    
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    try:
+        conn = get_connection()
+        try:
+            # Get resume info for logging
+            resume = conn.execute("SELECT candidate_name, file_name FROM resumes WHERE id = ?", (resume_id,)).fetchone()
+            if not resume:
+                return False, f"Resume ID {resume_id} not found."
+            
+            candidate_name = dict(resume).get("candidate_name", "Unknown")
+            
+            with conn:
+                # Delete from dependent tables first (foreign key consideration)
+                conn.execute("DELETE FROM skills WHERE resume_id = ?", (resume_id,))
+                conn.execute("DELETE FROM certifications WHERE resume_id = ?", (resume_id,))
+                conn.execute("DELETE FROM projects WHERE resume_id = ?", (resume_id,))
+                conn.execute("DELETE FROM candidate_scores WHERE resume_id = ?", (resume_id,))
+                conn.execute("DELETE FROM chat_history WHERE resume_id = ?", (resume_id,))
+                
+                # Delete from main resumes table
+                conn.execute("DELETE FROM resumes WHERE id = ?", (resume_id,))
+            
+            return True, f"Successfully deleted resume for {candidate_name} (ID: {resume_id}) and all associated data."
+        finally:
+            conn.close()
+    except Exception as e:
+        return False, f"Error deleting resume: {str(e)}"
+
+
+def delete_resume_from_vector_store(resume_id: int) -> Tuple[bool, str]:
+    """
+    Remove a resume from the vector store (FAISS/SimpleVectorStore).
+    
+    Args:
+        resume_id: The ID of the resume to remove
+    
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    try:
+        from rag_engine import RAGEngine
+        engine = RAGEngine()
+        success = engine.remove_from_index(resume_id)
+        if success:
+            return True, f"Removed resume {resume_id} from vector store."
+        else:
+            return False, f"Resume {resume_id} not found in vector store or already removed."
+    except Exception as e:
+        return False, f"Error removing from vector store: {str(e)}"

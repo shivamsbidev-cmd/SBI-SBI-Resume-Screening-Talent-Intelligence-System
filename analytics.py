@@ -66,6 +66,9 @@ def get_top_certifications(resumes: List[Dict], top_n: int = 10) -> Dict[str, in
     return sorted_counts
 
 
+top_skills = get_top_skills
+
+
 def build_education_distribution(resumes: List[Dict]) -> Dict[str, int]:
     counts = {}
     for resume in resumes:

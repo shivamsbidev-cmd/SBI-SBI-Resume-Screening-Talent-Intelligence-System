@@ -1,19 +1,15 @@
 from typing import Dict, List, Tuple
 
-import numpy as np
-from sentence_transformers import SentenceTransformer, util
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-
-
-def load_embedding_model() -> SentenceTransformer:
-    return SentenceTransformer(EMBEDDING_MODEL)
-
-
-def compute_similarity(text_a: str, text_b: str, model: SentenceTransformer) -> float:
-    embeddings = model.encode([text_a, text_b], normalize_embeddings=True)
-    score = float(util.cos_sim(embeddings[0], embeddings[1]).item())
-    return max(0.0, min(1.0, score))
+def compute_similarity(text_a: str, text_b: str) -> float:
+    """Compute text similarity using word overlap."""
+    words_a = set(text_a.lower().split())
+    words_b = set(text_b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    intersection = len(words_a & words_b)
+    union = len(words_a | words_b)
+    return intersection / union if union > 0 else 0.0
 
 
 def score_skill_match(candidate_skills: List[str], job_description: str) -> float:
@@ -55,9 +51,8 @@ def compute_final_score(
     education_text: str,
     experience_years: float,
     job_description: str,
-    model: SentenceTransformer,
 ) -> Dict[str, float]:
-    semantic_similarity = compute_similarity(resume_text, job_description, model)
+    semantic_similarity = compute_similarity(resume_text, job_description)
     skill_match = score_skill_match(candidate_skills, job_description)
     experience_match = score_experience_match(experience_years, job_description)
     education_match = score_education_match(education_text, job_description)
@@ -100,7 +95,6 @@ def generate_interview_questions(candidate_name: str, candidate_skills: List[str
 
 
 def rank_candidates(resumes: List[Dict], job_description: str) -> List[Dict]:
-    model = load_embedding_model()
     ranked: List[Dict] = []
     for resume in resumes:
         score_data = compute_final_score(
@@ -109,7 +103,6 @@ def rank_candidates(resumes: List[Dict], job_description: str) -> List[Dict]:
             education_text=resume.get("education", ""),
             experience_years=resume.get("experience_years", 0.0),
             job_description=job_description,
-            model=model,
         )
         label = label_candidate(score_data["score"])
         ranked.append(

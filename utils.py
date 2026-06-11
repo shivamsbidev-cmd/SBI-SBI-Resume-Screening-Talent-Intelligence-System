@@ -20,11 +20,11 @@ FAISS_DIR = Path(__file__).resolve().parent / "faiss_index"
 SUPPORTED_PDF_EXTENSIONS = {".pdf"}
 
 MODEL_OPTIONS = [
-    "openrouter/auto",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen3-32b:free",
-    "anthropic/claude-sonnet-4",
-    "openai/gpt-4.1-mini",
+    "openai/gpt-3.5-turbo",
+    "openai/gpt-4-turbo",
+    "anthropic/claude-3-haiku",
+    "anthropic/claude-3-sonnet",
+    "mistralai/mistral-7b-instruct",
 ]
 
 
@@ -57,34 +57,70 @@ def clean_text(text: str) -> str:
 
 
 def call_openrouter(api_key: str, model_name: str, prompt: str, max_tokens: int = 800, temperature: float = 0.2) -> str:
-    if not api_key:
-        raise ValueError("OpenRouter API key is required.")
+    if not api_key or not api_key.strip():
+        raise ValueError("OpenRouter API key is required. Please provide a valid API key in the sidebar.")
+    
+    api_key = api_key.strip()
+    model_name = model_name.strip() if model_name else "gpt-3.5-turbo"
+    
     url = "https://openrouter.ai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "User-Agent": "SBI-Talent-Intelligence-System/1.0",
     }
     payload = {
         "model": model_name,
         "messages": [
+            {"role": "system", "content": "You are a helpful HR assistant. Provide concise, accurate responses."},
             {"role": "user", "content": prompt},
         ],
         "temperature": temperature,
         "top_p": 0.95,
-        "max_tokens": max_tokens,
+        "max_tokens": min(max_tokens, 2000),
     }
+    
+    logger.info(f"Calling OpenRouter API with model: {model_name}")
+    
     try:
         response: Response = requests.post(url, json=payload, headers=headers, timeout=60)
+        
+        if response.status_code == 404:
+            logger.error(f"404 Error: Model '{model_name}' not found on OpenRouter. Check if model name is correct and API key is valid.")
+            raise ValueError(f"Model '{model_name}' not found on OpenRouter. Possible causes: Invalid API key, incorrect model name, or service unavailable.")
+        
+        if response.status_code == 401:
+            logger.error("401 Error: Unauthorized. API key is invalid or expired.")
+            raise ValueError("OpenRouter API authentication failed. Check your API key in the sidebar.")
+        
         response.raise_for_status()
         result = response.json()
+        
         if "choices" in result and len(result["choices"]) > 0:
-            return result["choices"][0]["message"].get("content", "")
+            content = result["choices"][0]["message"].get("content", "")
+            if content:
+                return content
+        
         if "output" in result and isinstance(result["output"], list):
             return "\n".join(str(item) for item in result["output"])
-        return json.dumps(result)
+        
+        logger.warning(f"Unexpected response format: {result}")
+        return "Unable to process response from OpenRouter API."
+        
+    except requests.ConnectionError as exc:
+        logger.error(f"Connection error: {exc}")
+        raise RuntimeError(f"Failed to connect to OpenRouter API. Check your internet connection and try again.") from exc
+    except requests.Timeout as exc:
+        logger.error(f"Request timeout: {exc}")
+        raise RuntimeError(f"OpenRouter API request timed out. Please try again.") from exc
     except requests.RequestException as exc:
-        logger.error("OpenRouter request failed: %s", exc)
+        logger.error(f"OpenRouter request failed: {exc}")
         raise RuntimeError(f"OpenRouter API request failed: {exc}") from exc
+    except ValueError as exc:
+        raise exc
+    except Exception as exc:
+        logger.error(f"Unexpected error: {exc}")
+        raise RuntimeError(f"Unexpected error calling OpenRouter API: {exc}") from exc
 
 
 def is_pdf_file(filename: str) -> bool:

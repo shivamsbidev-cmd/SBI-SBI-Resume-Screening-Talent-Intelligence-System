@@ -1,18 +1,17 @@
-import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+try:
+    from resume_parser_2 import chunk_text
+except Exception as exc:
+    raise ImportError(
+        "Could not import chunk_text from resume_parser_2.py. "
+        f"Ensure resume_parser_2.py defines chunk_text and that dependencies are installed. Original error: {exc}"
+    ) from exc
+from utils import FAISS_DIR, call_openrouter, ensure_directories, now_iso
 
-from resume_parser import chunk_text
-from utils import FAISS_DIR, call_openrouter, ensure_directories, json_serialize, now_iso
-
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-INDEX_FILE = FAISS_DIR / "faiss.index"
 METADATA_FILE = FAISS_DIR / "metadata.pkl"
 DOCS_FILE = FAISS_DIR / "documents.pkl"
 
@@ -24,32 +23,13 @@ class DocumentChunk:
     metadata: Dict[str, str]
 
 
-class FaissManager:
+class SimpleVectorStore:
+    """Pure-Python vector store without ML dependencies."""
+
     def __init__(self) -> None:
         ensure_directories()
-        self.model = SentenceTransformer(EMBEDDING_MODEL)
-        self.dimension = self.model.get_sentence_embedding_dimension()
-        self.index = self._load_or_init_index()
-        self.metadata: List[Dict[str, any]] = self._load_metadata()
         self.documents: List[DocumentChunk] = self._load_documents()
-
-    def _load_or_init_index(self) -> faiss.Index:
-        if INDEX_FILE.exists():
-            try:
-                index = faiss.read_index(str(INDEX_FILE))
-                return index
-            except Exception:
-                pass
-        return faiss.IndexFlatIP(self.dimension)
-
-    def _load_metadata(self) -> List[Dict[str, any]]:
-        if METADATA_FILE.exists():
-            try:
-                with open(METADATA_FILE, "rb") as stream:
-                    return pickle.load(stream)
-            except Exception:
-                return []
-        return []
+        self.metadata: List[Dict[str, any]] = self._load_metadata()
 
     def _load_documents(self) -> List[DocumentChunk]:
         if DOCS_FILE.exists():
@@ -60,22 +40,34 @@ class FaissManager:
                 return []
         return []
 
-    def save_index(self) -> None:
-        faiss.write_index(self.index, str(INDEX_FILE))
+    def _load_metadata(self) -> List[Dict[str, any]]:
+        if METADATA_FILE.exists():
+            try:
+                with open(METADATA_FILE, "rb") as stream:
+                    return pickle.load(stream)
+            except Exception:
+                return []
+        return []
+
+    def save_store(self) -> None:
         with open(METADATA_FILE, "wb") as stream:
             pickle.dump(self.metadata, stream)
         with open(DOCS_FILE, "wb") as stream:
             pickle.dump(self.documents, stream)
 
-    def embed_text(self, text: str) -> np.ndarray:
-        embeddings = self.model.encode([text], normalize_embeddings=True)
-        return embeddings.astype("float32")[0]
+    def _text_similarity(self, text_a: str, text_b: str) -> float:
+        """Compute Jaccard similarity between two texts."""
+        words_a = set(text_a.lower().split())
+        words_b = set(text_b.lower().split())
+        if not words_a or not words_b:
+            return 0.0
+        intersection = len(words_a & words_b)
+        union = len(words_a | words_b)
+        return intersection / union if union > 0 else 0.0
 
     def add_resume(self, resume_id: int, resume_text: str, file_name: str) -> int:
         chunks = chunk_text(resume_text, chunk_size=800, overlap=100)
-        embeddings = self.model.encode(chunks, normalize_embeddings=True).astype("float32")
-        self.index.add(embeddings)
-        for chunk, embedding in zip(chunks, embeddings):
+        for chunk in chunks:
             self.metadata.append({
                 "resume_id": resume_id,
                 "file_name": file_name,
@@ -83,19 +75,31 @@ class FaissManager:
                 "created_at": now_iso(),
             })
             self.documents.append(DocumentChunk(resume_id=resume_id, text=chunk, metadata={"file_name": file_name}))
-        self.save_index()
+        self.save_store()
         return len(chunks)
 
+    def remove_resume(self, resume_id: int) -> bool:
+        """Remove all documents for a specific resume from the vector store."""
+        original_count = len(self.documents)
+        self.documents = [doc for doc in self.documents if doc.resume_id != resume_id]
+        self.metadata = [meta for meta in self.metadata if meta.get("resume_id") != resume_id]
+        removed_count = original_count - len(self.documents)
+        if removed_count > 0:
+            self.save_store()
+            return True
+        return removed_count > 0
+
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, any]]:
-        if self.index.ntotal == 0:
+        if not self.metadata:
             return []
-        query_embedding = self.embed_text(query)[None, :]
-        scores, indexes = self.index.search(query_embedding, top_k)
-        results: List[Dict[str, any]] = []
-        for score, idx in zip(scores[0], indexes[0]):
-            if idx < 0 or idx >= len(self.metadata):
-                continue
-            metadata = self.metadata[idx]
+        scored_docs = []
+        for idx, metadata in enumerate(self.metadata):
+            content = metadata.get("content", "")
+            score = self._text_similarity(query, content)
+            scored_docs.append((score, idx, metadata))
+        scored_docs.sort(key=lambda item: item[0], reverse=True)
+        results = []
+        for score, idx, metadata in scored_docs[:top_k]:
             results.append({
                 "score": float(score),
                 "resume_id": int(metadata["resume_id"]),
@@ -107,13 +111,13 @@ class FaissManager:
 
 class RAGEngine:
     def __init__(self) -> None:
-        self.faiss_manager = FaissManager()
+        self.store = SimpleVectorStore()
 
     def index_resume(self, resume_id: int, resume_text: str, file_name: str) -> int:
-        return self.faiss_manager.add_resume(resume_id, resume_text, file_name)
+        return self.store.add_resume(resume_id, resume_text, file_name)
 
     def retrieve_documents(self, query: str, top_k: int = 5) -> List[Dict[str, any]]:
-        return self.faiss_manager.search(query, top_k=top_k)
+        return self.store.search(query, top_k=top_k)
 
     def answer_query(self, api_key: str, model_name: str, query: str, top_k: int = 5) -> str:
         context_chunks = self.retrieve_documents(query, top_k=top_k)
@@ -136,3 +140,7 @@ class RAGEngine:
             f"Resume Text:\n{resume_text}\n\n"
             "Answer in structured bullet points and assign one recommendation category: Strong Hire, Hire, Consider, Reject."
         )
+
+    def remove_from_index(self, resume_id: int) -> bool:
+        """Remove all documents for a specific resume from the vector store."""
+        return self.store.remove_resume(resume_id)

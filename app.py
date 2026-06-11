@@ -16,9 +16,9 @@ from analytics import (
     certification_trend_chart,
     education_pie_chart,
     experience_histogram,
+    get_top_skills,
     load_resume_dataframe,
     skill_frequency_chart,
-    top_skills,
 )
 from candidate_ranker import generate_interview_questions, rank_candidates
 from database import (
@@ -34,7 +34,14 @@ from database import (
     search_resumes,
 )
 from rag_engine import RAGEngine
-from resume_parser import parse_resume_file, validate_resume_file
+try:
+    from resume_parser_2 import parse_resume_file, validate_resume_file
+except Exception as exc:
+    raise ImportError(
+        "Could not import parser functions from resume_parser_2.py. "
+        "Ensure resume_parser_2.py defines parse_resume_file and validate_resume_file, "
+        f"and that all required dependencies are installed. Original error: {exc}"
+    ) from exc
 from talent_intelligence import fallback_candidate_summary, generate_candidate_intelligence
 from utils import DATA_DIR, FAISS_DIR, MODEL_OPTIONS, ensure_directories, now_iso
 
@@ -125,7 +132,7 @@ def export_resume_pdf(resumes: List[Dict[str, Any]]) -> bytes:
 def show_dashboard(resumes: List[Dict[str, Any]], rankings: Optional[List[Dict[str, Any]]] = None) -> None:
     total = len(resumes)
     avg_experience = sum([r.get("experience_years", 0.0) for r in resumes]) / total if total else 0.0
-    top_skill_counts = top_skills(resumes)
+    top_skill_counts = get_top_skills(resumes)
     education_dist = build_education_distribution(resumes)
     from analytics import get_top_certifications
 
@@ -197,14 +204,26 @@ def show_talent_intelligence(resumes: List[Dict[str, Any]], api_key: str, model_
         if not chosen:
             st.warning("Select a candidate to analyze.")
             return
-        if api_key and job_description:
-            with st.spinner("Generating insights from OpenRouter..."):
-                summary = generate_candidate_intelligence(
-                    chosen.get("resume_text", ""), job_description, api_key, model_name
-                )
-        else:
+        
+        try:
+            if api_key and job_description:
+                with st.spinner("Generating insights from OpenRouter..."):
+                    summary = generate_candidate_intelligence(
+                        chosen.get("resume_text", ""), job_description, api_key, model_name
+                    )
+            else:
+                st.info("No API key provided. Using template-based analysis.")
+                summary = fallback_candidate_summary(chosen.get("resume_text", ""), job_description)
+            st.markdown(summary)
+        except ValueError as ve:
+            st.error(f"Configuration Error: {str(ve)}")
+        except RuntimeError as re:
+            st.error(f"API Error: {str(re)}")
+            st.info("Using template-based analysis instead...")
             summary = fallback_candidate_summary(chosen.get("resume_text", ""), job_description)
-        st.markdown(summary)
+            st.markdown(summary)
+        except Exception as e:
+            st.error(f"Unexpected Error: {str(e)}")
 
 
 def show_resume_search(resumes: List[Dict[str, Any]]) -> None:
@@ -224,12 +243,19 @@ def show_rag_chat(api_key: str, model_name: str) -> None:
     prompt = st.text_area("Ask the talent intelligence assistant a question")
     if st.button("Submit Chat Query") and prompt:
         if not api_key:
-            st.warning("OpenRouter API key is required for RAG chat.")
+            st.warning("OpenRouter API key is required for RAG chat. Enter your API key in the sidebar.")
             return
-        response = rag_engine.answer_query(api_key, model_name, prompt, top_k=5)
-        save_chat_message(None, prompt, response, session_id)
-        st.markdown("**Assistant response:**")
-        st.write(response)
+        try:
+            response = rag_engine.answer_query(api_key, model_name, prompt, top_k=5)
+            save_chat_message(None, prompt, response, session_id)
+            st.markdown("**Assistant response:**")
+            st.write(response)
+        except ValueError as ve:
+            st.error(f"Configuration Error: {str(ve)}")
+        except RuntimeError as re:
+            st.error(f"API Error: {str(re)}")
+        except Exception as e:
+            st.error(f"Unexpected Error: {str(e)}")
     history = list_chat_history(limit=20)
     if history:
         st.subheader("Recent Chat History")
@@ -270,16 +296,85 @@ def show_candidate_ranking(resumes: List[Dict[str, Any]], api_key: str, model_na
 
 
 def show_database_explorer() -> None:
-    table = st.selectbox("Select a table to explore", ["resumes", "candidate_scores", "chat_history"])
-    if table == "resumes":
-        rows = collect_resume_dicts(list_resumes(limit=200))
-        st.dataframe(pd.DataFrame(rows))
-    elif table == "candidate_scores":
-        rows = list_candidate_scores(limit=200)
-        st.dataframe(pd.DataFrame([dict(row) for row in rows]))
-    elif table == "chat_history":
-        rows = list_chat_history(limit=200)
-        st.dataframe(pd.DataFrame([dict(row) for row in rows]))
+    tab1, tab2 = st.tabs(["Browse Tables", "Delete Resume"])
+    
+    with tab1:
+        table = st.selectbox("Select a table to explore", ["resumes", "candidate_scores", "chat_history"])
+        if table == "resumes":
+            rows = collect_resume_dicts(list_resumes(limit=200))
+            st.dataframe(pd.DataFrame(rows))
+        elif table == "candidate_scores":
+            rows = list_candidate_scores(limit=200)
+            st.dataframe(pd.DataFrame([dict(row) for row in rows]))
+        elif table == "chat_history":
+            rows = list_chat_history(limit=200)
+            st.dataframe(pd.DataFrame([dict(row) for row in rows]))
+    
+    with tab2:
+        st.header("🗑️ Delete Resume")
+        st.warning("⚠️ This action is permanent and will delete the resume from the database and vector store.")
+        
+        # Get list of resumes
+        resume_rows = list_resumes(limit=500)
+        resume_dicts = collect_resume_dicts(resume_rows)
+        
+        if not resume_dicts:
+            st.info("No resumes in database.")
+            return
+        
+        # Create options for selection
+        options = {
+            f"{r.get('candidate_name')} ({r.get('file_name')}) - ID: {r.get('id')}": r.get('id')
+            for r in resume_dicts
+        }
+        
+        selected_resume = st.selectbox("Select Resume to Delete", list(options.keys()))
+        
+        if selected_resume:
+            resume_id = options[selected_resume]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🗑️ Delete Resume from Database", key="delete_db"):
+                    from database import delete_resume
+                    success, message = delete_resume(resume_id)
+                    if success:
+                        st.success(message)
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(message)
+            
+            with col2:
+                if st.button("🗑️ Remove from Vector Store", key="delete_vector"):
+                    from database import delete_resume_from_vector_store
+                    success, message = delete_resume_from_vector_store(resume_id)
+                    if success:
+                        st.success(message)
+                    else:
+                        st.warning(message)
+            
+            st.info("**Pro Tip:** Delete from database first, then remove from vector store.")
+            st.divider()
+            st.subheader("Delete All Data for a Candidate")
+            if st.button("🗑️ Complete Deletion (DB + Vector Store)", key="delete_all"):
+                from database import delete_resume, delete_resume_from_vector_store
+                
+                # Delete from DB
+                db_success, db_msg = delete_resume(resume_id)
+                st.info(f"Database: {db_msg}")
+                
+                # Delete from vector store
+                vec_success, vec_msg = delete_resume_from_vector_store(resume_id)
+                st.info(f"Vector Store: {vec_msg}")
+                
+                if db_success or vec_success:
+                    st.success("✅ Candidate completely removed from the system!")
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error("Failed to delete candidate.")
 
 
 def show_reports(resumes: List[Dict[str, Any]]) -> None:
@@ -300,8 +395,29 @@ def main() -> None:
     ensure_directories()
 
     st.sidebar.title("SBI Talent Intelligence")
-    api_key = st.sidebar.text_input("OpenRouter API Key", type="password")
-    model_name = st.sidebar.selectbox("Language Model", MODEL_OPTIONS, index=0)
+    
+    # API Key input with instructions
+    st.sidebar.markdown("### 🔐 OpenRouter Configuration")
+    with st.sidebar.expander("How to get API Key?", expanded=False):
+        st.markdown("""
+        1. Go to [openrouter.ai](https://openrouter.ai)
+        2. Sign up or log in
+        3. Navigate to API keys
+        4. Create a new API key
+        5. Copy and paste it below
+        """)
+    
+    api_key = st.sidebar.text_input("API Key", type="password", help="Your OpenRouter API key (keep it secret!)")
+    
+    st.sidebar.markdown("### 🤖 Model Selection")
+    model_name = st.sidebar.selectbox(
+        "Language Model", 
+        MODEL_OPTIONS,
+        index=0,
+        help="Select the LLM for talent intelligence and RAG chat"
+    )
+    
+    st.sidebar.markdown("### 📄 Resume Upload")
     uploaded_files = st.sidebar.file_uploader(
         "Upload candidate resumes (PDF)", type=["pdf"], accept_multiple_files=True
     )
